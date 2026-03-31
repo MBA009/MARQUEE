@@ -1,0 +1,806 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>MARQUEE — Box Office Intelligence</title>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet"/>
+<style>
+  /* ── Reset & Base ─────────────────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:       #080a0d;
+    --surface:  #0e1117;
+    --panel:    #131821;
+    --border:   #1f2a38;
+    --gold:     #c8a84b;
+    --gold-dim: #7a6228;
+    --silver:   #8fa3b8;
+    --text:     #d4dde8;
+    --muted:    #4a5f72;
+    --red:      #c84b4b;
+    --green:    #4bc87a;
+    --radius:   4px;
+    --font-display: 'Cormorant Garamond', Georgia, serif;
+    --font-mono:    'Space Mono', monospace;
+  }
+
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1.6;
+    overflow-x: hidden;
+  }
+
+  /* ── Film-grain overlay ───────────────────────────────────────────── */
+  body::before {
+    content: '';
+    position: fixed; inset: 0; z-index: 1000;
+    pointer-events: none;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+    opacity: 0.35;
+  }
+
+  /* ── Scanlines ────────────────────────────────────────────────────── */
+  body::after {
+    content: '';
+    position: fixed; inset: 0; z-index: 999;
+    pointer-events: none;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0,0,0,0.06) 2px,
+      rgba(0,0,0,0.06) 4px
+    );
+  }
+
+  /* ── Layout ───────────────────────────────────────────────────────── */
+  .shell {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 0 24px 80px;
+  }
+
+  /* ── Header ───────────────────────────────────────────────────────── */
+  header {
+    padding: 56px 0 40px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 48px;
+    position: relative;
+  }
+  header::after {
+    content: '';
+    position: absolute;
+    bottom: -1px; left: 0;
+    width: 180px; height: 1px;
+    background: var(--gold);
+  }
+  .logo {
+    font-family: var(--font-display);
+    font-size: 52px;
+    font-weight: 300;
+    letter-spacing: 0.18em;
+    color: var(--gold);
+    line-height: 1;
+    text-transform: uppercase;
+  }
+  .tagline {
+    margin-top: 8px;
+    font-size: 11px;
+    letter-spacing: 0.25em;
+    color: var(--muted);
+    text-transform: uppercase;
+  }
+  .model-badge {
+    position: absolute;
+    top: 56px; right: 0;
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    color: var(--muted);
+    text-transform: uppercase;
+    border: 1px solid var(--border);
+    padding: 4px 10px;
+    border-radius: var(--radius);
+  }
+  .model-badge span { color: var(--gold); }
+
+  /* ── Section headings ─────────────────────────────────────────────── */
+  .section-heading {
+    font-family: var(--font-display);
+    font-size: 22px;
+    font-weight: 300;
+    letter-spacing: 0.1em;
+    color: var(--gold);
+    text-transform: uppercase;
+    margin-bottom: 20px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .section-heading::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+  .step-num {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    width: 22px; height: 22px;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+    letter-spacing: 0;
+  }
+
+  /* ── Search bar ───────────────────────────────────────────────────── */
+  .search-wrap {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 48px;
+  }
+  .search-input {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: var(--font-display);
+    font-size: 20px;
+    font-style: italic;
+    padding: 14px 18px;
+    outline: none;
+    border-radius: var(--radius);
+    transition: border-color .2s, box-shadow .2s;
+  }
+  .search-input::placeholder { color: var(--muted); font-style: italic; }
+  .search-input:focus {
+    border-color: var(--gold-dim);
+    box-shadow: 0 0 0 3px rgba(200,168,75,.08);
+  }
+  .btn {
+    background: var(--gold);
+    color: var(--bg);
+    border: none;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    padding: 0 24px;
+    cursor: pointer;
+    border-radius: var(--radius);
+    transition: background .2s, transform .1s;
+    white-space: nowrap;
+  }
+  .btn:hover { background: #ddb95a; }
+  .btn:active { transform: scale(.98); }
+  .btn:disabled { background: var(--muted); cursor: not-allowed; }
+  .btn-ghost {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--silver);
+  }
+  .btn-ghost:hover { border-color: var(--gold-dim); color: var(--gold); background: transparent; }
+
+  /* ── Status banner ────────────────────────────────────────────────── */
+  .status {
+    padding: 10px 16px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--surface);
+    margin-bottom: 28px;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    display: none;
+  }
+  .status.visible { display: flex; }
+  .status.loading { border-color: var(--gold-dim); }
+  .status.error   { border-color: var(--red); color: var(--red); }
+  .status.success { border-color: var(--green); }
+  .spinner {
+    width: 14px; height: 14px;
+    border: 2px solid var(--border);
+    border-top-color: var(--gold);
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+    flex-shrink: 0;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── Feature grid ─────────────────────────────────────────────────── */
+  #features-section { display: none; }
+  #features-section.visible { display: block; }
+
+  .feature-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px;
+    margin-bottom: 32px;
+  }
+  .feature-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    position: relative;
+    transition: border-color .2s;
+  }
+  .feature-card.auto-filled { border-color: var(--gold-dim); }
+  .feature-card.auto-filled::before {
+    content: 'AUTO';
+    position: absolute;
+    top: 8px; right: 10px;
+    font-size: 9px;
+    letter-spacing: 0.15em;
+    color: var(--gold);
+    opacity: .7;
+  }
+  .feature-card.imputed { border-color: var(--muted); opacity: 0.75; }
+  .feature-card.imputed::before {
+    content: 'ESTIMATED';
+    position: absolute;
+    top: 8px; right: 10px;
+    font-size: 9px;
+    letter-spacing: 0.15em;
+    color: var(--muted);
+  }
+  .feature-label {
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+  .feature-input {
+    width: 100%;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    padding: 7px 10px;
+    border-radius: var(--radius);
+    outline: none;
+    transition: border-color .2s;
+  }
+  .feature-input:focus { border-color: var(--gold-dim); }
+  .feature-input option { background: var(--panel); }
+
+  /* ── Actions row ──────────────────────────────────────────────────── */
+  .actions {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 48px;
+    flex-wrap: wrap;
+  }
+
+  /* ── Result panel ─────────────────────────────────────────────────── */
+  #result-section { display: none; }
+  #result-section.visible { display: block; }
+
+  .result-hero {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 40px;
+    margin-bottom: 24px;
+    position: relative;
+    overflow: hidden;
+    text-align: center;
+  }
+  .result-hero::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, var(--gold), transparent);
+  }
+  .result-tier {
+    font-size: 12px;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 12px;
+  }
+  .result-gross {
+    font-family: var(--font-display);
+    font-size: 72px;
+    font-weight: 300;
+    color: var(--gold);
+    line-height: 1;
+    margin-bottom: 8px;
+    animation: fadeUp .5s ease;
+  }
+  .result-unit {
+    font-size: 11px;
+    letter-spacing: 0.2em;
+    color: var(--muted);
+    text-transform: uppercase;
+    margin-bottom: 20px;
+  }
+  .result-ci {
+    display: inline-flex;
+    gap: 24px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    padding: 10px 24px;
+    border-radius: var(--radius);
+    font-size: 12px;
+  }
+  .ci-label { color: var(--muted); margin-right: 6px; }
+  .ci-val   { color: var(--silver); }
+
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(16px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  /* ── Feature importance bar chart ────────────────────────────────── */
+  .importance-grid {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 24px;
+    margin-bottom: 24px;
+  }
+  .importance-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 10px;
+  }
+  .imp-label {
+    width: 200px;
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    color: var(--silver);
+    text-align: right;
+    flex-shrink: 0;
+  }
+  .imp-bar-wrap {
+    flex: 1;
+    height: 6px;
+    background: var(--panel);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .imp-bar {
+    height: 100%;
+    background: var(--gold);
+    border-radius: 3px;
+    transition: width 1s ease;
+  }
+  .imp-pct {
+    width: 40px;
+    font-size: 11px;
+    color: var(--muted);
+    text-align: right;
+  }
+
+  /* ── Imputed notice ───────────────────────────────────────────────── */
+  .imputed-notice {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 18px;
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 24px;
+    line-height: 1.7;
+  }
+  .imputed-tag {
+    display: inline-block;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 1px 6px;
+    border-radius: 2px;
+    margin: 1px;
+    font-size: 10px;
+    letter-spacing: 0.08em;
+  }
+
+  /* ── Model metrics ────────────────────────────────────────────────── */
+  .metrics-row {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .metric-chip {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 20px;
+    text-align: center;
+    flex: 1;
+    min-width: 140px;
+  }
+  .metric-val {
+    font-family: var(--font-display);
+    font-size: 28px;
+    font-weight: 300;
+    color: var(--gold);
+    line-height: 1;
+  }
+  .metric-lbl {
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    color: var(--muted);
+    text-transform: uppercase;
+    margin-top: 4px;
+  }
+
+  /* ── Footer ───────────────────────────────────────────────────────── */
+  footer {
+    margin-top: 64px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    color: var(--muted);
+    text-transform: uppercase;
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  /* ── Responsive ───────────────────────────────────────────────────── */
+  @media (max-width: 600px) {
+    .logo { font-size: 34px; }
+    .result-gross { font-size: 48px; }
+    .imp-label { width: 120px; font-size: 10px; }
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- ── Header ──────────────────────────────────────────────────────── -->
+  <header>
+    <div class="logo">Marquee</div>
+    <div class="tagline">Box Office Intelligence Engine</div>
+    <div class="model-badge">Model: <span>GBR</span> · Features: <span>15</span></div>
+  </header>
+
+  <!-- ── Step 1 · Search ─────────────────────────────────────────────── -->
+  <div class="section-heading">
+    <div class="step-num">1</div>
+    Title Lookup
+  </div>
+  <div class="search-wrap">
+    <input class="search-input" id="titleInput"
+           type="text" placeholder="e.g. Interstellar, Barbie, The Dark Knight…"
+           onkeydown="if(event.key==='Enter') searchMovie()"/>
+    <button class="btn" id="searchBtn" onclick="searchMovie()">Search</button>
+  </div>
+
+  <!-- ── Status banner ───────────────────────────────────────────────── -->
+  <div class="status" id="status">
+    <div class="spinner" id="statusSpinner"></div>
+    <span id="statusText"></span>
+  </div>
+
+  <!-- ── Step 2 · Features ───────────────────────────────────────────── -->
+  <div id="features-section">
+    <div class="section-heading">
+      <div class="step-num">2</div>
+      Feature Review — Edit or Fill Any Missing Fields
+    </div>
+    <div class="feature-grid" id="featureGrid"></div>
+    <div class="actions">
+      <button class="btn" onclick="runPrediction()">Run Prediction</button>
+      <button class="btn btn-ghost" onclick="resetAll()">Reset</button>
+    </div>
+  </div>
+
+  <!-- ── Step 3 · Result ─────────────────────────────────────────────── -->
+  <div id="result-section">
+    <div class="section-heading">
+      <div class="step-num">3</div>
+      Prediction
+    </div>
+
+    <div class="result-hero">
+      <div class="result-tier" id="resultTier"></div>
+      <div class="result-gross" id="resultGross"></div>
+      <div class="result-unit">Predicted Worldwide Gross · USD</div>
+      <div class="result-ci" id="resultCI"></div>
+    </div>
+
+    <div class="imputed-notice" id="imputedNotice" style="display:none"></div>
+
+    <div class="importance-grid">
+      <div class="section-heading" style="font-size:16px; margin-bottom:16px;">
+        Feature Contributions
+      </div>
+      <div id="importanceChart"></div>
+    </div>
+
+    <div class="metrics-row" id="modelMetrics"></div>
+  </div>
+
+  <footer>
+    <span>Marquee · Box Office Predictor</span>
+    <span>Powered by GradientBoosting + Claude Web Search</span>
+  </footer>
+</div>
+
+<script>
+// ── Feature metadata ─────────────────────────────────────────────────────────
+const FEATURES = [
+  { key: "budget_m",           label: "Production Budget ($M)",             type: "number", placeholder: "e.g. 150" },
+  { key: "marketing_budget_m", label: "Marketing Budget ($M)",              type: "number", placeholder: "e.g. 75" },
+  { key: "release_month",      label: "Release Month (1–12)",               type: "number", placeholder: "e.g. 6" },
+  { key: "genre",              label: "Primary Genre",                      type: "select",
+    options: ["Action","Comedy","Drama","Horror","SciFi","Animation","Romance","Thriller","Fantasy","Documentary"] },
+  { key: "is_franchise",       label: "Part of Franchise?",                 type: "select", options: ["true","false"] },
+  { key: "sequel_number",      label: "Entry in Series (1 = original)",     type: "number", placeholder: "e.g. 1" },
+  { key: "director_score",     label: "Director Avg Gross – last 3 ($M)",   type: "number", placeholder: "e.g. 200" },
+  { key: "cast_score",         label: "Lead Actor Avg Gross – last 3 ($M)", type: "number", placeholder: "e.g. 250" },
+  { key: "screen_count",       label: "Opening Weekend Theaters",           type: "number", placeholder: "e.g. 3500" },
+  { key: "mpaa_rating",        label: "MPAA Rating",                        type: "select", options: ["G","PG","PG-13","R","NC-17"] },
+  { key: "runtime",            label: "Runtime (minutes)",                  type: "number", placeholder: "e.g. 130" },
+  { key: "trailer_views_m",    label: "YouTube Trailer Views (M)",          type: "number", placeholder: "e.g. 30" },
+  { key: "social_sentiment",   label: "Social Sentiment (0.0 – 1.0)",       type: "number", placeholder: "e.g. 0.72" },
+  { key: "rt_score",           label: "Rotten Tomatoes Score (0–100)",      type: "number", placeholder: "e.g. 78" },
+  { key: "competition_level",  label: "Opening Competition (1–10)",         type: "number", placeholder: "e.g. 5" },
+];
+
+const CONTRIB_LABELS = {
+  budget_m:            "Budget",
+  marketing_budget_m:  "Marketing",
+  release_month:       "Release Timing",
+  genre_encoded:       "Genre",
+  is_franchise:        "Franchise",
+  sequel_number:       "Sequel #",
+  director_score:      "Director",
+  cast_score:          "Cast",
+  screen_count:        "Screen Count",
+  mpaa_rating_encoded: "Rating",
+  runtime:             "Runtime",
+  trailer_views_m:     "Trailer Views",
+  social_sentiment:    "Social Buzz",
+  rt_score:            "Critics (RT)",
+  competition_level:   "Competition",
+};
+
+let currentData = {};
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
+function setStatus(msg, type = "loading") {
+  const el = document.getElementById("status");
+  const spinner = document.getElementById("statusSpinner");
+  const text = document.getElementById("statusText");
+  el.className = `status visible ${type}`;
+  spinner.style.display = type === "loading" ? "block" : "none";
+  text.textContent = msg;
+}
+function clearStatus() {
+  document.getElementById("status").classList.remove("visible");
+}
+function fmt(n) {
+  if (n >= 1000) return `$${(n/1000).toFixed(2)}B`;
+  if (n >= 100)  return `$${Math.round(n)}M`;
+  return `$${n.toFixed(1)}M`;
+}
+
+// ── Search ────────────────────────────────────────────────────────────────────
+async function searchMovie() {
+  const title = document.getElementById("titleInput").value.trim();
+  if (!title) return;
+
+  document.getElementById("searchBtn").disabled = true;
+  setStatus(`Searching for "${title}" — scanning the web…`, "loading");
+  document.getElementById("features-section").classList.remove("visible");
+  document.getElementById("result-section").classList.remove("visible");
+
+  try {
+    const res  = await fetch("/api/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    });
+    const json = await res.json();
+
+    if (!json.success) {
+      setStatus(`Search failed: ${json.error || "unknown error"}. Enter features manually.`, "error");
+      buildFeatureForm({}, []);
+      return;
+    }
+
+    const data = json.data;
+    currentData = data;
+    const found   = data.found   || [];
+    const missing = data.missing || [];
+
+    setStatus(
+      `Found ${found.length} features automatically · ${missing.length} need your input`,
+      "success"
+    );
+    buildFeatureForm(data, found);
+
+  } catch (e) {
+    setStatus(`Error: ${e.message}. Please enter features manually.`, "error");
+    buildFeatureForm({}, []);
+  } finally {
+    document.getElementById("searchBtn").disabled = false;
+  }
+}
+
+// ── Build form ────────────────────────────────────────────────────────────────
+function buildFeatureForm(data, found) {
+  const grid = document.getElementById("featureGrid");
+  grid.innerHTML = "";
+
+  FEATURES.forEach(f => {
+    const isFound  = found.includes(f.key);
+    const rawVal   = data[f.key];
+    const hasValue = rawVal !== null && rawVal !== undefined && rawVal !== "";
+
+    const card = document.createElement("div");
+    card.className = "feature-card" + (isFound && hasValue ? " auto-filled" : "");
+
+    const label = document.createElement("div");
+    label.className = "feature-label";
+    label.textContent = f.label;
+
+    let input;
+    if (f.type === "select") {
+      input = document.createElement("select");
+      input.className = "feature-input";
+      const emptyOpt = document.createElement("option");
+      emptyOpt.value = ""; emptyOpt.textContent = "— select —";
+      input.appendChild(emptyOpt);
+      f.options.forEach(o => {
+        const opt = document.createElement("option");
+        opt.value = o; opt.textContent = o;
+        if (hasValue && String(rawVal) === o) opt.selected = true;
+        input.appendChild(opt);
+      });
+    } else {
+      input = document.createElement("input");
+      input.type = "text";
+      input.className = "feature-input";
+      input.placeholder = f.placeholder || "";
+      if (hasValue) input.value = rawVal;
+    }
+
+    input.dataset.key = f.key;
+    card.appendChild(label);
+    card.appendChild(input);
+    grid.appendChild(card);
+  });
+
+  document.getElementById("features-section").classList.add("visible");
+}
+
+// ── Predict ───────────────────────────────────────────────────────────────────
+async function runPrediction() {
+  const inputs = document.querySelectorAll(".feature-input");
+  const payload = {};
+
+  inputs.forEach(inp => {
+    const key = inp.dataset.key;
+    const val = inp.value.trim();
+    if (!val) return;
+    if (inp.tagName === "SELECT") {
+      payload[key] = val === "true" ? true : val === "false" ? false : val;
+    } else {
+      const num = parseFloat(val);
+      payload[key] = isNaN(num) ? val : num;
+    }
+  });
+
+  setStatus("Running prediction…", "loading");
+
+  try {
+    const res  = await fetch("/api/predict", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    clearStatus();
+    renderResult(data);
+  } catch (e) {
+    setStatus(`Prediction error: ${e.message}`, "error");
+  }
+}
+
+// ── Render result ─────────────────────────────────────────────────────────────
+function renderResult(data) {
+  document.getElementById("resultTier").textContent  = data.tier;
+  document.getElementById("resultGross").textContent = fmt(data.predicted_gross_m);
+  document.getElementById("resultCI").innerHTML =
+    `<span><span class="ci-label">Low</span><span class="ci-val">${fmt(data.ci_low_m)}</span></span>` +
+    `<span><span class="ci-label">High</span><span class="ci-val">${fmt(data.ci_high_m)}</span></span>`;
+
+  // Imputed notice
+  const notice = document.getElementById("imputedNotice");
+  if (data.imputed_fields && data.imputed_fields.length) {
+    const tags = data.imputed_fields
+      .map(f => `<span class="imputed-tag">${CONTRIB_LABELS[f] || f}</span>`)
+      .join(" ");
+    notice.innerHTML = `<strong style="color:var(--silver)">Estimated fields (median-imputed):</strong><br/>${tags}`;
+    notice.style.display = "block";
+  } else {
+    notice.style.display = "none";
+  }
+
+  // Feature importance chart
+  const chart   = document.getElementById("importanceChart");
+  chart.innerHTML = "";
+  const contribs = data.contributions_pct || {};
+  const sorted   = Object.entries(contribs).sort((a, b) => b[1] - a[1]).slice(0, 10);
+  const max      = sorted[0]?.[1] || 1;
+
+  sorted.forEach(([key, pct]) => {
+    const row = document.createElement("div");
+    row.className = "importance-row";
+    row.innerHTML = `
+      <div class="imp-label">${CONTRIB_LABELS[key] || key}</div>
+      <div class="imp-bar-wrap">
+        <div class="imp-bar" style="width:${(pct/max*100).toFixed(1)}%"></div>
+      </div>
+      <div class="imp-pct">${pct}%</div>
+    `;
+    chart.appendChild(row);
+  });
+
+  // Model metrics
+  const m = data.model_metrics || {};
+  document.getElementById("modelMetrics").innerHTML = `
+    <div class="metric-chip">
+      <div class="metric-val">${((1 - (m.mape || 0)) * 100).toFixed(0)}%</div>
+      <div class="metric-lbl">Model Accuracy</div>
+    </div>
+    <div class="metric-chip">
+      <div class="metric-val">${(m.r2 || 0).toFixed(3)}</div>
+      <div class="metric-lbl">R² Score</div>
+    </div>
+    <div class="metric-chip">
+      <div class="metric-val">${((m.mape || 0) * 100).toFixed(1)}%</div>
+      <div class="metric-lbl">Median Abs % Error</div>
+    </div>
+    <div class="metric-chip">
+      <div class="metric-val">${(m.n_train || 0).toLocaleString()}</div>
+      <div class="metric-lbl">Training Samples</div>
+    </div>
+  `;
+
+  document.getElementById("result-section").classList.add("visible");
+  document.getElementById("result-section").scrollIntoView({ behavior: "smooth" });
+}
+
+// ── Reset ─────────────────────────────────────────────────────────────────────
+function resetAll() {
+  document.getElementById("titleInput").value = "";
+  document.getElementById("features-section").classList.remove("visible");
+  document.getElementById("result-section").classList.remove("visible");
+  clearStatus();
+  currentData = {};
+}
+
+// ── On load — show model stats ────────────────────────────────────────────────
+(async () => {
+  try {
+    const res  = await fetch("/api/model-info");
+    const data = await res.json();
+    const m    = data.metrics;
+    if (m) {
+      document.querySelector(".model-badge").innerHTML =
+        `Model: <span>GBR · R²=${m.r2}</span> · Trained: <span>${m.n_train.toLocaleString()} films</span>`;
+    }
+  } catch {}
+})();
+</script>
+</body>
+</html>
