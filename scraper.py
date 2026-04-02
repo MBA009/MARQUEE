@@ -359,42 +359,23 @@ def scrape_wikipedia(title: str) -> Dict[str, Any]:
                 result["cast_list"]  = names[:4]
             break
 
-    # ── Franchise / sequel detection ──────────────────────────────────────
-    full_text = (wikitext or "").lower()
-    title_lower = title.lower()
-
-    is_franchise = False
-    series_name  = None
-    for franchise in KNOWN_FRANCHISES:
-        if franchise in title_lower or franchise in full_text[:3000]:
-            is_franchise = True
-            series_name  = franchise.title()
-            break
-
-    # Check infobox for series field
-    for key in ("series", "franchise", "based_on"):
+    # ── Franchise / sequel detection — use authoritative lookup table ──────────────────
+    from franchise_lookup import (
+        is_franchise  as fl_is_franchise,
+        sequel_number as fl_sequel_number,
+        franchise_name as fl_franchise_name,
+    )
+    # Pass any infobox keywords as hints
+    kw_hints = []
+    for key in ("series","franchise","based_on"):
         if key in fields and fields[key].strip():
-            is_franchise = True
-            series_name  = _clean_wikitext(fields[key]).split("\n")[0].strip()
-            break
+            kw_hints.append(_clean_wikitext(fields[key]).split("\n")[0].strip())
+    result["is_franchise"]  = fl_is_franchise(title, kw_hints)
+    result["sequel_number"] = fl_sequel_number(title, kw_hints)
+    fn = fl_franchise_name(title)
+    if fn:
+        result["series_name"] = fn
 
-    result["is_franchise"] = is_franchise
-    if series_name:
-        result["series_name"] = series_name
-
-    # Estimate sequel number from title patterns
-    sequel_patterns = [
-        (r"\b2\b|ii\b|part\s*2|chapter\s*2|returns\b|reloaded\b", 2),
-        (r"\b3\b|iii\b|part\s*3|chapter\s*3|revolution\b|rises\b",  3),
-        (r"\b4\b|iv\b|part\s*4|chapter\s*4",                        4),
-        (r"\b5\b|v\b|part\s*5|chapter\s*5",                         5),
-    ]
-    sequel_number = 1
-    for pattern, num in sequel_patterns:
-        if re.search(pattern, title_lower):
-            sequel_number = num
-            break
-    result["sequel_number"] = sequel_number
 
     return result
 
@@ -705,11 +686,24 @@ def search_movie_features(title: str) -> Dict[str, Any]:
         social_sentiment = round(min(score, 0.98), 2)
 
     # Assemble output
+    # Determine release year from wiki data or default to current year
+    import datetime
+    release_year = None
+    if wiki_data.get("release_month"):
+        # Try to extract year from wiki page title or infobox
+        import re as _re
+        yr_match = _re.search(r'(19|20)\d{2}', wiki_data.get("wiki_page", ""))
+        if yr_match:
+            release_year = int(yr_match.group(0))
+    if not release_year:
+        release_year = datetime.date.today().year
+
     output = {
         "title":              title,
         "budget_m":           budget_m,
         "marketing_budget_m": marketing_budget_m,
         "release_month":      wiki_data.get("release_month"),
+        "release_year":       release_year,
         "genre":              wiki_data.get("genre"),
         "is_franchise":       wiki_data.get("is_franchise", False),
         "sequel_number":      wiki_data.get("sequel_number", 1),
@@ -725,7 +719,7 @@ def search_movie_features(title: str) -> Dict[str, Any]:
     }
 
     # Determine found / missing
-    skip_keys = {"title"}
+    skip_keys = {"title", "release_year"}  # release_year always inferred
     found   = [k for k, v in output.items() if k not in skip_keys and v is not None]
     missing = [k for k, v in output.items() if k not in skip_keys and v is None]
 
