@@ -5,13 +5,20 @@ Improvements over v1:
   • Uses franchise_lookup.py for accurate sequel/franchise detection
   • Inflation-adjusts all dollar figures to 2024 USD
   • Adds release_year as a model feature
-  • Better RT score proxy (weighted vote_average + confidence)
-  • Competition level estimated from release month (smarter than random)
   • Filters to 1990+ only
+
+v3: only emits the pre-release features listed in features.FEATURE_NAMES.
+Popularity/vote-based proxies (trailer views, sentiment, RT score) were
+removed because they are measured after release and leak the target;
+synthetic columns (marketing, screens, competition) and the constant MPAA
+rating were removed because they carried no real information. Inflation
+adjustment, genre encoding and person scores come from features.py, which
+the live scraper also uses.
 """
 
 import ast
 import json
+import sys
 import warnings
 from pathlib import Path
 
@@ -19,20 +26,16 @@ import numpy as np
 import pandas as pd
 
 warnings.filterwarnings("ignore")
+# Progress messages use emoji; don't crash on Windows consoles that can't show them
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(errors="replace")
 
 MOVIES_CSV  = Path("tmdb_5000_movies.csv")
 CREDITS_CSV = Path("tmdb_5000_credits.csv")
 OUTPUT_CSV  = Path("tmdb_features.csv")
-
-# CPI-U multipliers to convert to 2024 USD
-CPI_MULTIPLIER = {
-    1990:2.37,1991:2.27,1992:2.20,1993:2.14,1994:2.09,1995:2.03,
-    1996:1.97,1997:1.93,1998:1.90,1999:1.86,2000:1.80,2001:1.75,
-    2002:1.72,2003:1.68,2004:1.64,2005:1.59,2006:1.54,2007:1.49,
-    2008:1.44,2009:1.44,2010:1.42,2011:1.37,2012:1.34,2013:1.32,
-    2014:1.30,2015:1.30,2016:1.28,2017:1.25,2018:1.22,2019:1.19,
-    2020:1.18,2021:1.12,2022:1.02,2023:1.00,2024:1.00,2025:0.97,2026:0.94,
-}
+# Newer films from fetch_tmdb.py (same format); used when present
+API_MOVIES_CSV  = Path("tmdb_api_movies.csv")
+API_CREDITS_CSV = Path("tmdb_api_credits.csv")
 
 GENRE_MAP = {
     "Action":"Action","Adventure":"Action","Science Fiction":"SciFi",
@@ -42,15 +45,8 @@ GENRE_MAP = {
     "Fantasy":"Fantasy","Documentary":"Documentary","Music":"Drama",
     "History":"Drama","War":"Action","Western":"Action","TV Movie":"Drama",
 }
-GENRES_LIST  = ["Action","Comedy","Drama","Horror","SciFi","Animation","Romance","Thriller","Fantasy","Documentary"]
-MPAA_RATINGS = ["G","PG","PG-13","R","NC-17"]
 
-FEATURE_NAMES = [
-    "budget_m_adj","marketing_budget_m","release_month","genre_encoded",
-    "is_franchise","sequel_number","director_score","cast_score",
-    "screen_count","mpaa_rating_encoded","runtime","trailer_views_m",
-    "social_sentiment","rt_score","competition_level","release_year",
-]
+from features import FEATURE_NAMES, cpi_adjust, encode_genre, person_score
 
 def safe_json(val):
     if pd.isna(val) or not val:
@@ -78,17 +74,6 @@ def get_lead_actor(c):
 def get_keywords(k):
     return [x.get("name","") for x in safe_json(k)]
 
-def cpi_adjust(amount_m, year):
-    return amount_m * CPI_MULTIPLIER.get(int(year), 1.0)
-
-def extract_mpaa(r):
-    data=safe_json(r)
-    for c in (data.get("countries",[]) if isinstance(data,dict) else []):
-        if c.get("iso_3166_1")=="US":
-            cert=c.get("certification","").strip()
-            if cert in MPAA_RATINGS: return cert
-    return "PG-13"
-
 def build_person_scores(df):
     from collections import defaultdict
     df=df.copy()
@@ -102,7 +87,8 @@ def build_person_scores(df):
     fb=df[df["revenue_adj_m"]>0]["revenue_adj_m"].median()
     def avg(films,idx,p):
         prev=[g for i,g in films.get(p,[]) if i<idx and not np.isnan(g)]
-        return round(np.mean(prev[-5:]),1) if prev else fb
+        score=person_score(prev)
+        return score if score is not None else fb
     ds={}; cs={}
     for i,r in df.iterrows():
         ds[r["id"]]=avg(df_,i,r["director"])
@@ -118,10 +104,19 @@ def main():
 
     movies =pd.read_csv(MOVIES_CSV)
     credits=pd.read_csv(CREDITS_CSV)
-    print(f"    Movies:{len(movies):,}  Credits:{len(credits):,}")
+    movies["data_source"]="kaggle"
+    print(f"    Kaggle  movies:{len(movies):,}  credits:{len(credits):,}")
 
-    id_col="movie_id" if "movie_id" in credits.columns else "id"
-    df=movies.merge(credits,left_on="id",right_on=id_col,how="left",suffixes=("","_c"))
+    if API_MOVIES_CSV.exists() and API_CREDITS_CSV.exists():
+        api_movies =pd.read_csv(API_MOVIES_CSV)
+        api_credits=pd.read_csv(API_CREDITS_CSV)
+        api_movies["data_source"]="tmdb_api"
+        # API rows replace Kaggle rows for the same film (fresher revenue figures)
+        movies =pd.concat([movies[~movies["id"].isin(api_movies["id"])],api_movies],ignore_index=True)
+        credits=pd.concat([credits[~credits["movie_id"].isin(api_credits["movie_id"])],api_credits],ignore_index=True)
+        print(f"    + API   movies:{len(api_movies):,} → {len(movies):,} total")
+
+    df=movies.merge(credits,left_on="id",right_on="movie_id",how="left",suffixes=("","_c"))
 
     df["release_date_dt"]=pd.to_datetime(df["release_date"],errors="coerce")
     df["release_year"]=df["release_date_dt"].dt.year
@@ -139,8 +134,9 @@ def main():
 
     print("🏷  Franchise/sequel lookup …")
     from franchise_lookup import sequel_number as fl_seq, is_franchise as fl_fran
-    df["sequel_number"]=df.apply(lambda r:float(fl_seq(str(r["original_title"]),r["kw_list"])),axis=1)
-    df["is_franchise"] =df.apply(lambda r:float(fl_fran(str(r["original_title"]),r["kw_list"])),axis=1)
+    # English title, like the English Wikipedia titles the live scraper uses
+    df["sequel_number"]=df.apply(lambda r:float(fl_seq(str(r["title"]),r["kw_list"])),axis=1)
+    df["is_franchise"] =df.apply(lambda r:float(fl_fran(str(r["title"]),r["kw_list"])),axis=1)
     print(f"    Franchise:{int(df['is_franchise'].sum())}  Sequels>1:{int((df['sequel_number']>1).sum())}")
 
     print("🧮  Person scores …")
@@ -150,33 +146,13 @@ def main():
 
     df["release_month"]=df["release_date_dt"].dt.month.fillna(6).astype(int)
     df["genre"]=df["genres"].apply(first_genre)
-    df["genre_encoded"]=df["genre"].apply(lambda g:GENRES_LIST.index(g) if g in GENRES_LIST else 0)
-    df["marketing_budget_m"]=(df["budget_m_adj"]*0.5).round(1)
-    df["screen_count"]=(1200+df["budget_m_adj"]*10+
-        np.random.default_rng(42).normal(0,350,len(df))).clip(100,4500).round(0)
-
-    rc=next((c for c in df.columns if c in ("release_dates","releases")),None)
-    df["mpaa_rating"]=df[rc].apply(extract_mpaa) if rc else "PG-13"
-    df["mpaa_rating_encoded"]=df["mpaa_rating"].apply(lambda r:MPAA_RATINGS.index(r) if r in MPAA_RATINGS else 2)
+    df["genre_encoded"]=df["genre"].apply(encode_genre)
     df["runtime"]=pd.to_numeric(df["runtime"],errors="coerce").fillna(105)
 
-    # Trailer views: calibrated log-popularity
-    df["trailer_views_m"]=(np.log1p(df["popularity"])*12).clip(0.5,120).round(2)
-
-    # Social sentiment from vote_average
-    df["social_sentiment"]=((df["vote_average"]-5.0)/4.0).clip(0.05,0.98).round(3)
-
-    # RT score: vote_average * confidence weight
-    vc=np.log1p(df["vote_count"])/np.log1p(df["vote_count"].max())
-    df["rt_score"]=(df["vote_average"]*10*0.7+65*0.3).clip(0,100).round(1)
-
-    # Competition from release month (more realistic than pure random)
-    month_comp={1:3,2:3,3:5,4:5,5:7,6:8,7:8,8:6,9:5,10:6,11:7,12:9}
-    rng=np.random.default_rng(42)
-    df["competition_level"]=(df["release_month"].map(month_comp).fillna(5)+
-        rng.normal(0,1.5,len(df))).clip(1,10).round(1)
-
-    out=df[FEATURE_NAMES+["worldwide_gross_m"]].copy().dropna()
+    # Identity columns (not model inputs) record which films the model learns from
+    df["tmdb_id"]=df["id"]
+    out=df[["tmdb_id","title","data_source"]+FEATURE_NAMES+["worldwide_gross_m"]].dropna(
+        subset=FEATURE_NAMES+["worldwide_gross_m"]).copy()
     print(f"    Final dataset: {len(out):,} films")
     print("\n📊  Gross distribution (2024-adjusted $M):")
     print(out["worldwide_gross_m"].describe(percentiles=[.1,.25,.5,.75,.9]).round(1).to_string())

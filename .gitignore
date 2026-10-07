@@ -1,0 +1,7 @@
+# Secrets (TMDB key for fetch_tmdb.py)
+.env
+
+# Caches
+.tmdb_cache/
+.wiki_cache.sqlite
+__pycache__/

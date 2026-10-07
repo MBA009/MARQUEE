@@ -2,70 +2,61 @@
 Movie Box Office Predictor — FastAPI Backend
 =============================================
 Pipeline:
-  1. On startup → synthetic training data is generated (or loaded) and a
-     GradientBoostingRegressor is trained / loaded from disk.
-  2. POST /api/search  → uses the Anthropic API + web-search to auto-fill
-     movie features; returns found fields, missing fields, and confidence scores.
+  1. On startup → model_bundle.pkl is loaded, or a model is trained via
+     retrain.py on tmdb_features.csv (synthetic data only if that is missing).
+  2. POST /api/candidates → films matching a title (to pick between remakes);
+     POST /api/search → scrapes Wikipedia / Wikidata / The Numbers
+     (scraper.py) to auto-fill movie features.
   3. POST /api/predict → accepts a (possibly partial) feature dict, imputes
      any missing values with dataset medians, and returns the predicted
-     worldwide gross with a confidence interval + feature importances.
+     worldwide gross (2024 USD) with a per-film 80% prediction interval
+     (calibrated on held-out years), plus how each feature moved it.
   4. GET  /            → serves the single-page HTML UI.
 """
 
-import json
-import os
 import re
+import sys
 import warnings
+from datetime import date
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import joblib
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel
-from sklearn.ensemble import GradientBoostingRegressor
-from sklearn.metrics import mean_absolute_percentage_error, r2_score
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
+from pydantic import BaseModel, Field
+
+from features import GENRES, cpi_adjust, encode_genre
+from retrain import (FEATURES_CSV, load_features_csv, predict_interval, save_bundle, train,
+                     training_role)
 
 warnings.filterwarnings("ignore")
+# Startup messages use emoji; don't crash on Windows consoles that can't show them
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(errors="replace")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
 MODEL_PATH = Path("model_bundle.pkl")
-GENRES = ["Action", "Comedy", "Drama", "Horror", "SciFi",
-          "Animation", "Romance", "Thriller", "Fantasy", "Documentary"]
 RATINGS = ["G", "PG", "PG-13", "R", "NC-17"]
-FEATURE_NAMES = [
-    "budget_m_adj", "marketing_budget_m", "release_month", "genre_encoded",
-    "is_franchise", "sequel_number", "director_score", "cast_score",
-    "screen_count", "mpaa_rating_encoded", "runtime", "trailer_views_m",
-    "social_sentiment", "rt_score", "competition_level", "release_year",
-]
 FEATURE_LABELS = {
     "budget_m_adj":        "Production Budget, 2024-adj ($M)",
-    "marketing_budget_m":  "Marketing Budget ($M)",
     "release_month":       "Release Month (1–12)",
     "genre":               "Primary Genre",
     "is_franchise":        "Part of Franchise?",
     "sequel_number":       "Entry # in Series (1 = original)",
     "director_score":      "Director Avg Gross – last 5 films ($M)",
     "cast_score":          "Lead Actor Avg Gross – last 5 films ($M)",
-    "screen_count":        "Opening Weekend Theaters",
-    "mpaa_rating":         "MPAA Rating",
     "runtime":             "Runtime (minutes)",
-    "trailer_views_m":     "Total Trailer Views on YouTube (M)",
-    "social_sentiment":    "Social Media Sentiment (0–1)",
-    "rt_score":            "Rotten Tomatoes Score (0–100)",
-    "competition_level":   "Opening-Weekend Competition (1–10)",
     "release_year":        "Release Year",
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Synthetic dataset generation (fallback when no real data is available)
+# Synthetic dataset generation (fallback when tmdb_features.csv is missing).
+# Generates extra columns; train() only uses FEATURE_NAMES.
 # ─────────────────────────────────────────────────────────────────────────────
 def generate_dataset(n: int = 6000, seed: int = 42) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
@@ -143,76 +134,27 @@ def generate_dataset(n: int = 6000, seed: int = 42) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Model training (synthetic fallback — runs when no pkl exists and no TMDB data)
+# Model training
 # ─────────────────────────────────────────────────────────────────────────────
 def train_and_save():
-    print("⚙  Generating synthetic training data …")
-    df = generate_dataset(6000)
-    X  = df[FEATURE_NAMES]
-    y  = np.log1p(df["worldwide_gross_m"])
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.15, random_state=42)
-
-    scaler    = StandardScaler()
-    X_train_s = scaler.fit_transform(X_train)
-    X_test_s  = scaler.transform(X_test)
-
-    try:
-        import xgboost as xgb
-        print("🏋  Training XGBoost (synthetic data) …")
-        model = xgb.XGBRegressor(
-            n_estimators=600, max_depth=5, learning_rate=0.05,
-            subsample=0.8, colsample_bytree=0.8, min_child_weight=5,
-            reg_alpha=0.1, reg_lambda=1.0, random_state=42,
-            n_jobs=-1, verbosity=0,
-        )
-        model.fit(X_train_s, y_train)
-        model_type = "XGBoost"
-    except ImportError:
-        print("🏋  Training GradientBoostingRegressor (synthetic data) …")
-        model = GradientBoostingRegressor(
-            n_estimators=500, max_depth=4, learning_rate=0.08,
-            min_samples_leaf=15, subsample=0.75, random_state=42,
-        )
-        model.fit(X_train_s, y_train)
-        model_type = "GradientBoosting"
-
-    log_preds      = model.predict(X_test_s)
-    r2             = r2_score(y_test, log_preds)
-    preds_dollar   = np.expm1(log_preds)
-    actuals_dollar = np.expm1(y_test)
-    mape = float(np.median(
-        np.abs(preds_dollar - actuals_dollar) / (actuals_dollar + 1e-6)))
-    medians = {f: float(X[f].median()) for f in FEATURE_NAMES}
-
-    try:
-        importances = dict(zip(FEATURE_NAMES, model.feature_importances_))
-    except AttributeError:
-        importances = {f: 1/len(FEATURE_NAMES) for f in FEATURE_NAMES}
-
-    bundle = {
-        "model":         model,
-        "scaler":        scaler,
-        "medians":       medians,
-        "feature_names": FEATURE_NAMES,
-        "metrics": {
-            "r2":         round(r2, 4),
-            "mape":       round(mape, 4),
-            "n_train":    len(X_train),
-            "model_type": model_type,
-            "source":     "synthetic",
-        },
-        "importances": importances,
-    }
-    joblib.dump(bundle, MODEL_PATH)
-    print(f"✅  Model saved. R²={r2:.3f}  MAPE={mape:.1%}  ({model_type})")
+    if FEATURES_CSV.exists():
+        print(f"⚙  Training on {FEATURES_CSV} …")
+        bundle = train(load_features_csv(), source="TMDB real data")
+    else:
+        print(f"⚙  {FEATURES_CSV} not found — training on synthetic data …")
+        bundle = train(generate_dataset(6000), source="synthetic")
+    save_bundle(bundle)
+    m = bundle["metrics"]
+    print(f"✅  Model saved. Held-out R²={m['r2']:.3f}  MedAPE={m['mape']:.1%}  ({m['model_type']})")
     return bundle
 
 def load_or_train():
     if MODEL_PATH.exists():
         print("📦  Loading existing model …")
-        return joblib.load(MODEL_PATH)
+        bundle = joblib.load(MODEL_PATH)
+        if "interval_model" in bundle and "training_data" in bundle:
+            return bundle
+        print("⚠  Model bundle is from an older version — retraining …")
     return train_and_save()
 
 
@@ -230,27 +172,25 @@ def startup():
 
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
+class CandidatesRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+
+
 class SearchRequest(BaseModel):
-    title: str
+    title: str = Field(min_length=1, max_length=200)
+    page:  Optional[str] = Field(None, max_length=300)  # exact Wikipedia title, from /api/candidates
 
 
 class PredictRequest(BaseModel):
-    budget_m:            Optional[float] = None
-    marketing_budget_m:  Optional[float] = None
-    release_month:       Optional[int]   = None
+    budget_m:            Optional[float] = Field(None, gt=0, le=2000)
+    release_month:       Optional[int]   = Field(None, ge=1, le=12)
     genre:               Optional[str]   = None
     is_franchise:        Optional[bool]  = None
-    sequel_number:       Optional[int]   = None
-    director_score:      Optional[float] = None
-    cast_score:          Optional[float] = None
-    screen_count:        Optional[int]   = None
-    mpaa_rating:         Optional[str]   = None
-    runtime:             Optional[int]   = None
-    trailer_views_m:     Optional[float] = None
-    social_sentiment:    Optional[float] = None
-    rt_score:            Optional[float] = None
-    competition_level:   Optional[float] = None
-    release_year:        Optional[int]   = None
+    sequel_number:       Optional[int]   = Field(None, ge=1, le=50)
+    director_score:      Optional[float] = Field(None, ge=0, le=10000)
+    cast_score:          Optional[float] = Field(None, ge=0, le=10000)
+    runtime:             Optional[int]   = Field(None, ge=30, le=400)
+    release_year:        Optional[int]   = Field(None, ge=1900, le=2100)
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────
@@ -263,21 +203,35 @@ def root():
 def model_info():
     return {
         "metrics":     BUNDLE["metrics"],
+        "interval":    BUNDLE["interval"],
+        "training_data": BUNDLE["training_data"],
         "importances": BUNDLE["importances"],
         "feature_labels": FEATURE_LABELS,
     }
 
 
+@app.post("/api/candidates")
+def film_candidates(req: CandidatesRequest):
+    """Films matching a title, so the user can pick between same-named films.
+    `candidates` is null if the lookup failed (the UI then searches directly)."""
+    from scraper import search_film_candidates
+    return {"candidates": search_film_candidates(req.title)}
+
+
+# Plain `def` routes run in FastAPI's threadpool, so a slow scrape doesn't
+# block other requests
 @app.post("/api/search")
-async def search_features(req: SearchRequest):
+def search_features(req: SearchRequest):
     """
-    Scrape Wikipedia, The Numbers, Metacritic, and YouTube to auto-extract
-    box-office relevant features for the given movie title.
-    No API keys required — all public web sources.
+    Scrape Wikipedia, Wikidata and The Numbers to auto-extract the model's
+    features for a film. No API keys required — all public web sources.
     """
     try:
         from scraper import search_movie_features
-        data = search_movie_features(req.title)
+        data = search_movie_features(req.title, req.page)
+        # Was this film in the training data? (exact title + year match)
+        film_title = re.sub(r"\s*\([^)]*\)$", "", data.get("wiki_page") or req.title)
+        data["training_role"] = training_role(BUNDLE, film_title, data.get("release_year"))
         return JSONResponse(content={"success": True, "data": data})
     except Exception as e:
         import traceback
@@ -293,37 +247,39 @@ def predict(req: PredictRequest):
     """
     Predict worldwide box-office gross.
     Missing features are imputed from training-set medians.
-    Returns point estimate, confidence interval, per-feature contributions,
-    and a list of which fields were imputed.
+    The budget is given in release-year dollars and inflation-adjusted here,
+    as in training; director/cast scores are already in 2024 USD.
+    Returns point estimate (2024 USD), 80% prediction interval, per-feature
+    effects, a list of which fields were imputed, and warnings.
     """
     medians  = BUNDLE["medians"]
     model    = BUNDLE["model"]
-    scaler   = BUNDLE["scaler"]
+    feat_names = BUNDLE["feature_names"]
 
-    genre_enc  = GENRES.index(req.genre)  if req.genre  in GENRES  else None
-    rating_enc = RATINGS.index(req.mpaa_rating) if req.mpaa_rating in RATINGS else None
+    budget_adj = (cpi_adjust(req.budget_m, req.release_year or date.today().year)
+                  if req.budget_m is not None else None)
 
-    # Use whichever feature names are in the loaded model bundle
-    feat_names = BUNDLE.get("feature_names", FEATURE_NAMES)
+    warnings_out = []
+    year_lo, year_hi = BUNDLE.get("year_range", (None, None))
+    if req.release_year and year_hi and req.release_year > year_hi:
+        warnings_out.append(
+            f"The training data ends in {year_hi}; the model treats a "
+            f"{req.release_year} release like a {year_hi} one.")
+    elif req.release_year and year_lo and req.release_year < year_lo:
+        warnings_out.append(
+            f"The training data starts in {year_lo}; the model treats a "
+            f"{req.release_year} release like a {year_lo} one.")
 
     raw_input = {
-        "budget_m_adj":        req.budget_m,   # UI still calls it budget_m
-        "budget_m":            req.budget_m,   # backwards compat if old model
-        "marketing_budget_m":  req.marketing_budget_m,
+        "budget_m_adj":        budget_adj,
         "release_month":       req.release_month,
-        "genre_encoded":       genre_enc,
+        "genre_encoded":       encode_genre(req.genre),
         "is_franchise":        (1.0 if req.is_franchise else 0.0)
                                if req.is_franchise is not None else None,
         "sequel_number":       req.sequel_number,
         "director_score":      req.director_score,
         "cast_score":          req.cast_score,
-        "screen_count":        req.screen_count,
-        "mpaa_rating_encoded": rating_enc,
         "runtime":             req.runtime,
-        "trailer_views_m":     req.trailer_views_m,
-        "social_sentiment":    req.social_sentiment,
-        "rt_score":            req.rt_score,
-        "competition_level":   req.competition_level,
         "release_year":        req.release_year,
     }
 
@@ -337,27 +293,29 @@ def predict(req: PredictRequest):
         else:
             final_values[feat] = float(val)
 
-    X = np.array([[final_values[f] for f in feat_names]])
-    X_scaled = scaler.transform(X)
+    X = pd.DataFrame([final_values], columns=feat_names)
 
-    log_pred = float(model.predict(X_scaled)[0])
+    log_pred = float(model.predict(X)[0])
     gross_m  = float(np.expm1(log_pred))
 
-    # Confidence interval — multiplicative band (box office is log-normal)
-    # Based on typical model uncertainty: 10th/90th percentile of predictions
-    ci_low  = gross_m * 0.45
-    ci_high = gross_m * 2.20
+    # Per-film 80% prediction interval (calibrated quantile models)
+    low_log, high_log = predict_interval(
+        BUNDLE["interval_model"], BUNDLE["interval"]["calibration"], X, np.array([log_pred]))[0]
+    ci_low, ci_high = float(np.expm1(low_log)), float(np.expm1(high_log))
 
-    # Simple feature contribution (importance × scaled value)
-    importances = BUNDLE["importances"]
-    contributions = {
-        f: float(importances.get(f, 0) * abs(X_scaled[0][i]))
-        for i, f in enumerate(feat_names)
-    }
-    # Normalise contributions to percentages
-    total = sum(contributions.values()) or 1
-    contributions_pct = {f: round(v / total * 100, 1)
-                         for f, v in contributions.items()}
+    # How each feature moved this prediction: XGBoost's built-in SHAP values.
+    # The model works in log dollars, so each value is a multiplier on the
+    # baseline (the model's typical film): baseline × all factors ≈ prediction.
+    effects = None
+    try:
+        import xgboost as xgb
+        shap = model.get_booster().predict(xgb.DMatrix(X), pred_contribs=True)[0]
+        effects = {
+            "baseline_m": round(float(np.expm1(shap[-1])), 1),
+            "factors":    {f: round(float(np.exp(v)), 3) for f, v in zip(feat_names, shap[:-1])},
+        }
+    except (ImportError, AttributeError):
+        pass  # non-XGBoost fallback model: no per-prediction explanation
 
     tier = ("Blockbuster 🎬" if gross_m > 500
             else "Major Hit 🌟" if gross_m > 200
@@ -371,7 +329,11 @@ def predict(req: PredictRequest):
         "ci_high_m":         round(ci_high, 1),
         "tier":              tier,
         "imputed_fields":    imputed_fields,
-        "contributions_pct": contributions_pct,
+        "warnings":          warnings_out,
+        "effects":           effects,
+        "interval_coverage": BUNDLE["interval"]["coverage"],
+        "interval_test_coverage": BUNDLE["interval"]["test_coverage"],
+        "training_years":    BUNDLE.get("year_range"),
         "model_metrics":     BUNDLE["metrics"],
     }
 
@@ -379,12 +341,11 @@ def predict(req: PredictRequest):
 @app.post("/api/retrain")
 def retrain():
     global BUNDLE
-    if MODEL_PATH.exists():
-        MODEL_PATH.unlink()
     BUNDLE = train_and_save()
     return {"success": True, "metrics": BUNDLE["metrics"]}
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
+    # Local only; pass host="0.0.0.0" to expose it on your network
+    uvicorn.run("app:app", host="127.0.0.1", port=8000)

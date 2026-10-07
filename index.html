@@ -216,6 +216,31 @@
   @keyframes spin { to { transform: rotate(360deg); } }
 
   /* ── Feature grid ─────────────────────────────────────────────────── */
+  /* ── Film picker ─────────────────────────────────────────────────── */
+  .candidates { display: none; flex-direction: column; gap: 8px; margin-bottom: 24px; }
+  .candidates.visible { display: flex; }
+  .candidate {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 12px;
+    text-align: left;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 14px;
+    color: var(--text);
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .candidate:hover, .candidate:focus-visible { border-color: var(--gold-dim); outline: none; }
+  .candidate strong { color: var(--gold); font-weight: 400; }
+  .candidate span { color: var(--muted); font-size: 11px; }
+  .candidate.other { border-style: dashed; }
+
+  .feature-input:invalid { border-color: var(--red); }
+
   #features-section { display: none; }
   #features-section.visible { display: block; }
 
@@ -326,9 +351,17 @@
     text-transform: uppercase;
     margin-bottom: 20px;
   }
+  .result-actual {
+    margin-top: 14px;
+    font-size: 12px;
+    color: var(--silver);
+    line-height: 1.6;
+  }
   .result-ci {
     display: inline-flex;
-    gap: 24px;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px 24px;
     background: var(--panel);
     border: 1px solid var(--border);
     padding: 10px 24px;
@@ -367,19 +400,38 @@
   }
   .imp-bar-wrap {
     flex: 1;
+    position: relative;
     height: 6px;
     background: var(--panel);
     border-radius: 3px;
     overflow: hidden;
   }
+  .imp-bar-wrap::after {   /* centre line = no effect */
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: var(--muted);
+  }
   .imp-bar {
+    position: absolute;
+    top: 0;
     height: 100%;
     background: var(--gold);
-    border-radius: 3px;
     transition: width 1s ease;
   }
+  .imp-bar.up   { left: 50%;  background: var(--green); border-radius: 0 3px 3px 0; }
+  .imp-bar.down { right: 50%; background: var(--red);   border-radius: 3px 0 0 3px; }
+  .imp-caption {
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 14px;
+    line-height: 1.6;
+  }
   .imp-pct {
-    width: 40px;
+    width: 48px;
     font-size: 11px;
     color: var(--muted);
     text-align: right;
@@ -467,7 +519,7 @@
   <header>
     <div class="logo">Marquee</div>
     <div class="tagline">Box Office Intelligence Engine</div>
-    <div class="model-badge">Model: <span>GBR</span> · Features: <span>15</span></div>
+    <div class="model-badge">Model: <span>XGBoost</span> · Features: <span>9</span></div>
   </header>
 
   <!-- ── Step 1 · Search ─────────────────────────────────────────────── -->
@@ -487,6 +539,9 @@
     <div class="spinner" id="statusSpinner"></div>
     <span id="statusText"></span>
   </div>
+
+  <!-- ── Film picker (when several films share a title) ─────────────── -->
+  <div class="candidates" id="candidates"></div>
 
   <!-- ── Step 2 · Features ───────────────────────────────────────────── -->
   <div id="features-section">
@@ -511,16 +566,18 @@
     <div class="result-hero">
       <div class="result-tier" id="resultTier"></div>
       <div class="result-gross" id="resultGross"></div>
-      <div class="result-unit">Predicted Worldwide Gross · USD</div>
+      <div class="result-unit">Predicted Worldwide Gross · 2024 USD</div>
       <div class="result-ci" id="resultCI"></div>
+      <div class="result-actual" id="resultActual"></div>
     </div>
 
     <div class="imputed-notice" id="imputedNotice" style="display:none"></div>
 
     <div class="importance-grid">
       <div class="section-heading" style="font-size:16px; margin-bottom:16px;">
-        Feature Contributions
+        What Drove This Estimate
       </div>
+      <div class="imp-caption" id="importanceCaption"></div>
       <div id="importanceChart"></div>
     </div>
 
@@ -529,48 +586,34 @@
 
   <footer>
     <span>Marquee · Box Office Predictor</span>
-    <span>Powered by GradientBoosting + Claude Web Search</span>
+    <span>Powered by XGBoost · Data from Wikipedia, Wikidata + The Numbers</span>
   </footer>
 </div>
 
 <script>
 // ── Feature metadata ─────────────────────────────────────────────────────────
 const FEATURES = [
-  { key: "budget_m",           label: "Production Budget ($M)",             type: "number", placeholder: "e.g. 150" },
-  { key: "marketing_budget_m", label: "Marketing Budget ($M)",              type: "number", placeholder: "e.g. 75" },
-  { key: "release_month",      label: "Release Month (1–12)",               type: "number", placeholder: "e.g. 6" },
+  { key: "budget_m",           label: "Production Budget ($M, at release)", type: "number", placeholder: "e.g. 150", min: 0.1, max: 2000 },
+  { key: "release_month",      label: "Release Month (1–12)",               type: "number", placeholder: "e.g. 6", min: 1, max: 12, step: 1 },
   { key: "genre",              label: "Primary Genre",                      type: "select",
     options: ["Action","Comedy","Drama","Horror","SciFi","Animation","Romance","Thriller","Fantasy","Documentary"] },
   { key: "is_franchise",       label: "Part of Franchise?",                 type: "select", options: ["true","false"] },
-  { key: "sequel_number",      label: "Entry in Series (1 = original)",     type: "number", placeholder: "e.g. 1" },
-  { key: "director_score",     label: "Director Avg Gross – last 3 ($M)",   type: "number", placeholder: "e.g. 200" },
-  { key: "cast_score",         label: "Lead Actor Avg Gross – last 3 ($M)", type: "number", placeholder: "e.g. 250" },
-  { key: "screen_count",       label: "Opening Weekend Theaters",           type: "number", placeholder: "e.g. 3500" },
-  { key: "mpaa_rating",        label: "MPAA Rating",                        type: "select", options: ["G","PG","PG-13","R","NC-17"] },
-  { key: "runtime",            label: "Runtime (minutes)",                  type: "number", placeholder: "e.g. 130" },
-  { key: "trailer_views_m",    label: "YouTube Trailer Views (M)",          type: "number", placeholder: "e.g. 30" },
-  { key: "social_sentiment",   label: "Social Sentiment (0.0 – 1.0)",       type: "number", placeholder: "e.g. 0.72" },
-  { key: "rt_score",           label: "Rotten Tomatoes Score (0–100)",      type: "number", placeholder: "e.g. 78" },
-  { key: "competition_level",  label: "Opening Competition (1–10)",         type: "number", placeholder: "e.g. 5" },
-  { key: "release_year",       label: "Release Year",                         type: "number", placeholder: "e.g. 2026" },
+  { key: "sequel_number",      label: "Entry in Series (1 = original)",     type: "number", placeholder: "e.g. 1", min: 1, max: 50, step: 1 },
+  { key: "director_score",     label: "Director Avg Gross – prior 5 (2024 $M)", type: "number", placeholder: "e.g. 200", min: 0, max: 10000 },
+  { key: "cast_score",         label: "Lead Actor Avg Gross – prior 5 (2024 $M)", type: "number", placeholder: "e.g. 250", min: 0, max: 10000 },
+  { key: "runtime",            label: "Runtime (minutes)",                  type: "number", placeholder: "e.g. 130", min: 30, max: 400, step: 1 },
+  { key: "release_year",       label: "Release Year",                         type: "number", placeholder: "e.g. 2026", min: 1900, max: 2100, step: 1 },
 ];
 
 const CONTRIB_LABELS = {
   budget_m:            "Budget",
-  marketing_budget_m:  "Marketing",
   release_month:       "Release Timing",
   genre_encoded:       "Genre",
   is_franchise:        "Franchise",
   sequel_number:       "Sequel #",
   director_score:      "Director",
   cast_score:          "Cast",
-  screen_count:        "Screen Count",
-  mpaa_rating_encoded: "Rating",
   runtime:             "Runtime",
-  trailer_views_m:     "Trailer Views",
-  social_sentiment:    "Social Buzz",
-  rt_score:            "Critics (RT)",
-  competition_level:   "Competition",
   release_year:        "Release Year",
 };
 
@@ -600,15 +643,71 @@ async function searchMovie() {
   if (!title) return;
 
   document.getElementById("searchBtn").disabled = true;
-  setStatus(`Searching for "${title}" — scanning the web…`, "loading");
+  hideCandidates();
   document.getElementById("features-section").classList.remove("visible");
   document.getElementById("result-section").classList.remove("visible");
+  currentData = {};
+  setStatus(`Looking up films called "${title}"…`, "loading");
+
+  let candidates = null;
+  try {
+    const res = await fetch("/api/candidates", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    });
+    if (res.ok) candidates = (await res.json()).candidates;
+  } catch {}
+
+  if (candidates && candidates.length > 1) {
+    showCandidates(title, candidates);
+    setStatus(`${candidates.length} films match "${title}" — pick one`, "success");
+    document.getElementById("searchBtn").disabled = false;
+    return;
+  }
+  // One match: use its exact page. None, or the lookup failed: search by title.
+  await scrapeFeatures(title, candidates && candidates.length === 1 ? candidates[0].page : null);
+}
+
+function showCandidates(title, candidates) {
+  const box = document.getElementById("candidates");
+  box.innerHTML = "";
+  const pick = page => { hideCandidates(); scrapeFeatures(title, page); };
+  candidates.forEach(c => {
+    const btn = document.createElement("button");
+    btn.className = "candidate";
+    const name = document.createElement("strong");
+    name.textContent = c.page.replace(/\s*\([^)]*\)$/, "") + (c.year ? ` (${c.year})` : "");
+    const desc = document.createElement("span");
+    desc.textContent = c.description;
+    btn.append(name, desc);
+    btn.onclick = () => pick(c.page);
+    box.appendChild(btn);
+  });
+  const other = document.createElement("button");
+  other.className = "candidate other";
+  other.textContent = `None of these — search Wikipedia for "${title}"`;
+  other.onclick = () => pick(null);
+  box.appendChild(other);
+  box.classList.add("visible");
+  box.querySelector("button").focus();
+}
+
+function hideCandidates() {
+  const box = document.getElementById("candidates");
+  box.classList.remove("visible");
+  box.innerHTML = "";
+}
+
+async function scrapeFeatures(title, page) {
+  document.getElementById("searchBtn").disabled = true;
+  setStatus(`Gathering data for "${page || title}" — this takes 5–20 seconds…`, "loading");
 
   try {
     const res  = await fetch("/api/search", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title }),
+      body: JSON.stringify({ title, page }),
     });
     const json = await res.json();
 
@@ -620,11 +719,13 @@ async function searchMovie() {
 
     const data = json.data;
     currentData = data;
-    const found   = data.found   || [];
-    const missing = data.missing || [];
+    const keys    = FEATURES.map(f => f.key);
+    const found   = (data.found   || []).filter(k => keys.includes(k));
+    const missing = (data.missing || []).filter(k => keys.includes(k));
 
     setStatus(
-      `Found ${found.length} features automatically · ${missing.length} need your input`,
+      `Found ${found.length} features automatically · ${missing.length} need your input` +
+        (data.notes ? ` — ${data.notes}` : ""),
       "success"
     );
     buildFeatureForm(data, found);
@@ -669,7 +770,10 @@ function buildFeatureForm(data, found) {
       });
     } else {
       input = document.createElement("input");
-      input.type = "text";
+      input.type = "number";
+      if (f.min !== undefined) input.min = f.min;
+      if (f.max !== undefined) input.max = f.max;
+      input.step = f.step || "any";
       input.className = "feature-input";
       input.placeholder = f.placeholder || "";
       if (hasValue) input.value = rawVal;
@@ -688,6 +792,13 @@ function buildFeatureForm(data, found) {
 async function runPrediction() {
   const inputs = document.querySelectorAll(".feature-input");
   const payload = {};
+
+  const invalid = [...inputs].filter(inp => !inp.checkValidity())
+    .map(inp => FEATURES.find(f => f.key === inp.dataset.key).label);
+  if (invalid.length) {
+    setStatus(`Please fix: ${invalid.join(", ")} (out of range or not a number)`, "error");
+    return;
+  }
 
   inputs.forEach(inp => {
     const key = inp.dataset.key;
@@ -710,6 +821,13 @@ async function runPrediction() {
       body: JSON.stringify(payload),
     });
     const data = await res.json();
+    if (!res.ok) {
+      const detail = Array.isArray(data.detail)
+        ? data.detail.map(d => `${d.loc[d.loc.length - 1]}: ${d.msg}`).join("; ")
+        : (data.detail || res.statusText);
+      setStatus(`Prediction error: ${detail}`, "error");
+      return;
+    }
     clearStatus();
     renderResult(data);
   } catch (e) {
@@ -723,50 +841,87 @@ function renderResult(data) {
   document.getElementById("resultGross").textContent = fmt(data.predicted_gross_m);
   document.getElementById("resultCI").innerHTML =
     `<span><span class="ci-label">Low</span><span class="ci-val">${fmt(data.ci_low_m)}</span></span>` +
-    `<span><span class="ci-label">High</span><span class="ci-val">${fmt(data.ci_high_m)}</span></span>`;
+    `<span><span class="ci-label">High</span><span class="ci-val">${fmt(data.ci_high_m)}</span></span>` +
+    `<span><span class="ci-label">${Math.round((data.interval_coverage || 0.8) * 100)}% range for this film` +
+    (data.interval_test_coverage ? ` · held ${Math.round(data.interval_test_coverage * 100)}% of ` +
+      `${data.model_metrics?.test_years || "held-out"} films in testing` : "") +
+    `</span></span>`;
+
+  // Actual vs predicted, for films already in release
+  const actualEl = document.getElementById("resultActual");
+  const actual   = currentData.actual_gross_adj_m;
+  if (actual) {
+    const year    = currentData.release_year;
+    const ratio   = data.predicted_gross_m / actual;
+    const off     = ratio >= 1 ? `${ratio.toFixed(1)}× too high` : `${(1 / ratio).toFixed(1)}× too low`;
+    const inRange = actual >= data.ci_low_m && actual <= data.ci_high_m;
+    // Exact match against the films the model was trained on
+    const role = currentData.training_role;
+    const seen = role === "test"
+      ? " · in the test set: the accuracy figures were measured without it, but the deployed model has seen it"
+      : role ? " · this film is in the training data, which flatters the comparison"
+      : " · not in the training data: a true out-of-sample check";
+    actualEl.textContent =
+      `${year >= new Date().getFullYear() ? "Actual so far" : "Actual"}: ${fmt(actual)} (Wikipedia, in 2024 USD) · ` +
+      `prediction ${Math.abs(ratio - 1) < 0.1 ? "within 10%" : off} · ${inRange ? "inside" : "outside"} the range` +
+      seen;
+  } else {
+    actualEl.textContent = "";
+  }
 
   // Imputed notice
   const notice = document.getElementById("imputedNotice");
+  const parts  = [];
   if (data.imputed_fields && data.imputed_fields.length) {
     const tags = data.imputed_fields
       .map(f => `<span class="imputed-tag">${CONTRIB_LABELS[f] || f}</span>`)
       .join(" ");
-    notice.innerHTML = `<strong style="color:var(--silver)">Estimated fields (median-imputed):</strong><br/>${tags}`;
-    notice.style.display = "block";
-  } else {
-    notice.style.display = "none";
+    parts.push(`<strong style="color:var(--silver)">Estimated fields (median-imputed):</strong><br/>${tags}`);
   }
+  (data.warnings || []).forEach(w => parts.push(`<strong style="color:var(--silver)">Note:</strong> ${w}`));
+  notice.innerHTML = parts.join("<br/>");
+  notice.style.display = parts.length ? "block" : "none";
 
-  // Feature importance chart
+  // What drove the estimate: each feature multiplies a typical film's gross
   const chart   = document.getElementById("importanceChart");
+  const caption = document.getElementById("importanceCaption");
   chart.innerHTML = "";
-  const contribs = data.contributions_pct || {};
-  const sorted   = Object.entries(contribs).sort((a, b) => b[1] - a[1]).slice(0, 10);
-  const max      = sorted[0]?.[1] || 1;
+  const effects = data.effects;
+  if (!effects) {
+    caption.textContent = "Per-film explanations need the XGBoost model.";
+  } else {
+    caption.textContent =
+      `A typical film in the training data makes about ${fmt(effects.baseline_m)}. ` +
+      `Each bar shows how much this film's inputs multiplied that, ending at ${fmt(data.predicted_gross_m)}.`;
+    const sorted = Object.entries(effects.factors)
+      .sort((a, b) => Math.abs(Math.log(b[1])) - Math.abs(Math.log(a[1])));
+    const max = Math.abs(Math.log(sorted[0]?.[1] || 2)) || 1;
 
-  sorted.forEach(([key, pct]) => {
-    const row = document.createElement("div");
-    row.className = "importance-row";
-    row.innerHTML = `
-      <div class="imp-label">${CONTRIB_LABELS[key] || key}</div>
-      <div class="imp-bar-wrap">
-        <div class="imp-bar" style="width:${(pct/max*100).toFixed(1)}%"></div>
-      </div>
-      <div class="imp-pct">${pct}%</div>
-    `;
-    chart.appendChild(row);
-  });
+    sorted.forEach(([key, factor]) => {
+      const share = Math.abs(Math.log(factor)) / max * 50;   // % of bar width, per side
+      const row = document.createElement("div");
+      row.className = "importance-row";
+      row.innerHTML = `
+        <div class="imp-label">${CONTRIB_LABELS[key] || key}</div>
+        <div class="imp-bar-wrap">
+          <div class="imp-bar ${factor >= 1 ? "up" : "down"}" style="width:${share.toFixed(1)}%"></div>
+        </div>
+        <div class="imp-pct">×${factor >= 10 ? factor.toFixed(0) : factor.toFixed(2)}</div>
+      `;
+      chart.appendChild(row);
+    });
+  }
 
   // Model metrics
   const m = data.model_metrics || {};
   document.getElementById("modelMetrics").innerHTML = `
     <div class="metric-chip">
-      <div class="metric-val">${((1 - (m.mape || 0)) * 100).toFixed(0)}%</div>
-      <div class="metric-lbl">Model Accuracy</div>
+      <div class="metric-val">${((m.within_2x || 0) * 100).toFixed(0)}%</div>
+      <div class="metric-lbl">Within 2× of Actual</div>
     </div>
     <div class="metric-chip">
       <div class="metric-val">${(m.r2 || 0).toFixed(3)}</div>
-      <div class="metric-lbl">R² Score</div>
+      <div class="metric-lbl">R² (held-out)</div>
     </div>
     <div class="metric-chip">
       <div class="metric-val">${((m.mape || 0) * 100).toFixed(1)}%</div>
@@ -776,6 +931,7 @@ function renderResult(data) {
       <div class="metric-val">${(m.n_train || 0).toLocaleString()}</div>
       <div class="metric-lbl">Training Samples</div>
     </div>
+    <div class="metric-lbl" style="flex-basis:100%">Accuracy measured on ${m.n_test || "?"} ${m.test_split || "held-out films"} that the model hadn't seen.</div>
   `;
 
   document.getElementById("result-section").classList.add("visible");
@@ -785,6 +941,7 @@ function renderResult(data) {
 // ── Reset ─────────────────────────────────────────────────────────────────────
 function resetAll() {
   document.getElementById("titleInput").value = "";
+  hideCandidates();
   document.getElementById("features-section").classList.remove("visible");
   document.getElementById("result-section").classList.remove("visible");
   clearStatus();
@@ -798,8 +955,14 @@ function resetAll() {
     const data = await res.json();
     const m    = data.metrics;
     if (m) {
+      const td = data.training_data || {};
+      const sources = Object.entries(td.by_source || {})
+        .map(([src, n]) => `${n.toLocaleString()} ${src === "tmdb_api" ? "TMDB API" : src === "kaggle" ? "Kaggle" : src}`)
+        .join(" + ");
       document.querySelector(".model-badge").innerHTML =
-        `Model: <span>GBR · R²=${m.r2}</span> · Trained: <span>${m.n_train.toLocaleString()} films</span>`;
+        `Model: <span>${m.model_type} · held-out R²=${m.r2}</span> · ` +
+        `Trained: <span>${m.n_train.toLocaleString()} films${td.years ? `, ${td.years}` : ""}</span>` +
+        (sources ? ` (${sources})` : "");
     }
   } catch {}
 })();
